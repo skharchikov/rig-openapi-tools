@@ -1,121 +1,15 @@
-use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+use openapi_utils::SpecExt;
+use openapiv3::{OpenAPI, Parameter, ParameterSchemaOrContent, ReferenceOr};
 use rig::completion::ToolDefinition;
 use rig::tool::{ToolDyn, ToolError};
-use serde::Deserialize;
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
-// OpenAPI spec types (private, minimal subset)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct OpenApiSpec {
-    #[serde(default)]
-    servers: Vec<Server>,
-    #[serde(default)]
-    paths: BTreeMap<String, PathItem>,
-}
-
-#[derive(Deserialize)]
-struct Server {
-    url: String,
-}
-
-#[derive(Deserialize, Default)]
-struct PathItem {
-    #[serde(default)]
-    get: Option<Operation>,
-    #[serde(default)]
-    post: Option<Operation>,
-    #[serde(default)]
-    put: Option<Operation>,
-    #[serde(default)]
-    patch: Option<Operation>,
-    #[serde(default)]
-    delete: Option<Operation>,
-}
-
-#[derive(Deserialize)]
-struct Operation {
-    #[serde(rename = "operationId")]
-    operation_id: Option<String>,
-    summary: Option<String>,
-    description: Option<String>,
-    #[serde(default)]
-    parameters: Vec<Parameter>,
-    #[serde(rename = "requestBody")]
-    request_body: Option<RequestBody>,
-}
-
-#[derive(Deserialize)]
-struct Parameter {
-    name: String,
-    #[serde(rename = "in")]
-    location: String,
-    #[serde(default)]
-    required: Option<bool>,
-    description: Option<String>,
-    #[serde(default)]
-    schema: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct RequestBody {
-    #[serde(default)]
-    required: Option<bool>,
-    #[serde(default)]
-    content: BTreeMap<String, MediaType>,
-}
-
-#[derive(Deserialize)]
-struct MediaType {
-    schema: Option<Value>,
-}
-
-// ---------------------------------------------------------------------------
-// $ref resolution
-// ---------------------------------------------------------------------------
-
-fn resolve_refs(value: &mut Value, root: &Value) {
-    match value {
-        Value::Object(map) => {
-            if let Some(Value::String(ref_path)) = map.get("$ref") {
-                if let Some(resolved) = json_pointer(root, ref_path) {
-                    let mut resolved = resolved.clone();
-                    resolve_refs(&mut resolved, root);
-                    *value = resolved;
-                    return;
-                }
-            }
-            for v in map.values_mut() {
-                resolve_refs(v, root);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                resolve_refs(v, root);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn json_pointer<'a>(root: &'a Value, ref_path: &str) -> Option<&'a Value> {
-    let path = ref_path.strip_prefix("#/")?;
-    let mut current = root;
-    for segment in path.split('/') {
-        let decoded = segment.replace("~1", "/").replace("~0", "~");
-        current = current.get(&decoded)?;
-    }
-    Some(current)
-}
-
-// ---------------------------------------------------------------------------
-// Internal tool representation
+// Internal types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy)]
@@ -166,9 +60,6 @@ struct OpenApiTool {
     request_body_schema: Option<Value>,
     request_body_required: bool,
 }
-
-// Send + Sync is required by ToolDyn (via WasmCompatSend/Sync).
-// All fields are Send + Sync, so this is automatic.
 
 impl OpenApiTool {
     fn build_parameters_schema(&self) -> Value {
@@ -225,7 +116,6 @@ impl OpenApiTool {
 
         let url = format!("{}{}", self.base_url, path);
 
-        // Build request
         let mut req = match self.method {
             HttpMethod::Get => self.client.get(&url),
             HttpMethod::Post => self.client.post(&url),
@@ -234,7 +124,7 @@ impl OpenApiTool {
             HttpMethod::Delete => self.client.delete(&url),
         };
 
-        // Add query params
+        // Query params
         let query_params: Vec<(String, String)> = self
             .parameters
             .iter()
@@ -254,7 +144,7 @@ impl OpenApiTool {
             req = req.query(&query_params);
         }
 
-        // Add request body
+        // Request body
         if let Some(body) = args_obj.get("body") {
             req = req.json(body);
         }
@@ -295,6 +185,46 @@ impl ToolDyn for OpenApiTool {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers for extracting data from openapiv3 types
+// ---------------------------------------------------------------------------
+
+fn extract_param_info(param: &Parameter) -> Option<ParamInfo> {
+    let (data, location) = match param {
+        Parameter::Path { parameter_data, .. } => (parameter_data, ParamLocation::Path),
+        Parameter::Query { parameter_data, .. } => (parameter_data, ParamLocation::Query),
+        Parameter::Header { parameter_data, .. } => (parameter_data, ParamLocation::Header),
+        Parameter::Cookie { .. } => return None,
+    };
+
+    let schema = match &data.format {
+        ParameterSchemaOrContent::Schema(ReferenceOr::Item(schema)) => {
+            serde_json::to_value(schema).unwrap_or(serde_json::json!({"type": "string"}))
+        }
+        _ => serde_json::json!({"type": "string"}),
+    };
+
+    Some(ParamInfo {
+        name: data.name.clone(),
+        location,
+        required: data.required,
+        description: data.description.clone().unwrap_or_default(),
+        schema,
+    })
+}
+
+fn extract_body_schema(body: &openapiv3::RequestBody) -> (Option<Value>, bool) {
+    let schema = body
+        .content
+        .get("application/json")
+        .and_then(|mt| mt.schema.as_ref())
+        .and_then(|s| match s {
+            ReferenceOr::Item(schema) => serde_json::to_value(schema).ok(),
+            _ => None,
+        });
+    (schema, body.required)
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -314,28 +244,23 @@ impl OpenApiToolset {
 
     /// Parse an OpenAPI spec from a YAML or JSON string.
     pub fn from_spec_str(spec_str: &str) -> anyhow::Result<Self> {
-        Self::parse(spec_str, None)
+        Self::build(spec_str, None)
     }
 
     /// Parse an OpenAPI spec, overriding the base URL from the spec.
     pub fn from_str_with_base_url(spec_str: &str, base_url: &str) -> anyhow::Result<Self> {
-        Self::parse(spec_str, Some(base_url))
+        Self::build(spec_str, Some(base_url))
     }
 
     /// Parse an OpenAPI spec file, overriding the base URL from the spec.
     pub fn from_file_with_base_url(path: impl AsRef<Path>, base_url: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Self::parse(&content, Some(base_url))
+        Self::build(&content, Some(base_url))
     }
 
-    fn parse(spec_str: &str, base_url_override: Option<&str>) -> anyhow::Result<Self> {
-        // Parse YAML/JSON into a Value for $ref resolution
-        let mut root: Value = serde_yaml::from_str(spec_str)?;
-        let snapshot = root.clone();
-        resolve_refs(&mut root, &snapshot);
-
-        // Deserialize into typed structs
-        let spec: OpenApiSpec = serde_json::from_value(root)?;
+    fn build(spec_str: &str, base_url_override: Option<&str>) -> anyhow::Result<Self> {
+        let spec: OpenAPI = serde_yaml::from_str(spec_str)?;
+        let spec = spec.deref_all();
 
         let base_url = base_url_override
             .map(|s| s.to_string())
@@ -346,59 +271,50 @@ impl OpenApiToolset {
         let client = reqwest::Client::new();
         let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
-        for (path_template, item) in spec.paths {
+        for (path_template, path_item_ref) in &spec.paths {
+            let ReferenceOr::Item(path_item) = path_item_ref else {
+                continue;
+            };
+
             let methods = [
-                (HttpMethod::Get, item.get),
-                (HttpMethod::Post, item.post),
-                (HttpMethod::Put, item.put),
-                (HttpMethod::Patch, item.patch),
-                (HttpMethod::Delete, item.delete),
+                (HttpMethod::Get, &path_item.get),
+                (HttpMethod::Post, &path_item.post),
+                (HttpMethod::Put, &path_item.put),
+                (HttpMethod::Patch, &path_item.patch),
+                (HttpMethod::Delete, &path_item.delete),
             ];
 
             for (method, op) in methods {
                 let Some(op) = op else { continue };
 
-                let operation_id = op.operation_id.unwrap_or_else(|| {
-                    format!(
-                        "{}_{}",
-                        method.as_str().to_lowercase(),
-                        path_template.replace('/', "_").trim_start_matches('_')
-                    )
+                let method_lower = method.as_str().to_lowercase();
+                let operation_id = op.operation_id.clone().unwrap_or_else(|| {
+                    let path_slug = path_template.replace('/', "_");
+                    let path_slug = path_slug.trim_start_matches('_');
+                    format!("{}_{}", method_lower, path_slug)
                 });
 
                 let description = op
                     .summary
-                    .or(op.description)
+                    .clone()
+                    .or_else(|| op.description.clone())
                     .unwrap_or_else(|| format!("{} {}", method.as_str(), path_template));
 
                 let parameters: Vec<ParamInfo> = op
                     .parameters
-                    .into_iter()
-                    .filter_map(|p| {
-                        let location = match p.location.as_str() {
-                            "path" => ParamLocation::Path,
-                            "query" => ParamLocation::Query,
-                            "header" => ParamLocation::Header,
-                            _ => return None,
-                        };
-                        Some(ParamInfo {
-                            name: p.name,
-                            location,
-                            required: p
-                                .required
-                                .unwrap_or(matches!(location, ParamLocation::Path)),
-                            description: p.description.unwrap_or_default(),
-                            schema: p.schema.unwrap_or(serde_json::json!({"type": "string"})),
-                        })
+                    .iter()
+                    .filter_map(|p| match p {
+                        ReferenceOr::Item(param) => extract_param_info(param),
+                        _ => None,
                     })
                     .collect();
 
                 let (request_body_schema, request_body_required) = op
                     .request_body
-                    .and_then(|rb| {
-                        let required = rb.required.unwrap_or(false);
-                        let schema = rb.content.get("application/json")?.schema.clone()?;
-                        Some((Some(schema), required))
+                    .as_ref()
+                    .and_then(|rb| match rb {
+                        ReferenceOr::Item(body) => Some(extract_body_schema(body)),
+                        _ => None,
                     })
                     .unwrap_or((None, false));
 
