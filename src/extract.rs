@@ -16,7 +16,10 @@ pub(crate) fn extract_param_info(param: &Parameter, resolver: &Resolver) -> Opti
         ParameterSchemaOrContent::Schema(ref_or_schema) => {
             match resolver.resolve_schema(ref_or_schema) {
                 Some(schema) => {
-                    serde_json::to_value(schema).unwrap_or(serde_json::json!({"type": "string"}))
+                    let mut val = serde_json::to_value(schema)
+                        .unwrap_or(serde_json::json!({"type": "string"}));
+                    resolver.inline_refs(&mut val);
+                    val
                 }
                 None => serde_json::json!({"type": "string"}),
             }
@@ -42,6 +45,10 @@ pub(crate) fn extract_body_schema(
         .get("application/json")
         .and_then(|mt| mt.schema.as_ref())
         .and_then(|s| resolver.resolve_schema(s))
-        .and_then(|schema| serde_json::to_value(schema).ok());
+        .and_then(|schema| serde_json::to_value(schema).ok())
+        .map(|mut val| {
+            resolver.inline_refs(&mut val);
+            val
+        });
     (schema, body.required)
 }
