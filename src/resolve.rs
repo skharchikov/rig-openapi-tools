@@ -78,19 +78,17 @@ impl<'a> Resolver<'a> {
                         }
                         visited.insert(name.to_string());
 
-                        if let Some(resolved) = self
+                        if let Some(ReferenceOr::Item(schema)) = self
                             .spec
                             .components
                             .as_ref()
                             .and_then(|c| c.schemas.get(name))
                         {
-                            if let ReferenceOr::Item(schema) = resolved {
-                                if let Ok(mut inlined) = serde_json::to_value(schema) {
-                                    self.inline_refs_inner(&mut inlined, visited);
-                                    *value = inlined;
-                                    visited.remove(name);
-                                    return;
-                                }
+                            if let Ok(mut inlined) = serde_json::to_value(schema) {
+                                self.inline_refs_inner(&mut inlined, visited);
+                                *value = inlined;
+                                visited.remove(name);
+                                return;
                             }
                         }
                         visited.remove(name);
