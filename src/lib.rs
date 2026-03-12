@@ -1,14 +1,15 @@
 mod extract;
+mod resolve;
 mod tool;
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use openapi_utils::SpecExt;
 use openapiv3::{OpenAPI, ReferenceOr};
 use rig::tool::ToolDyn;
 
 use crate::extract::{extract_body_schema, extract_param_info};
+use crate::resolve::Resolver;
 use crate::tool::{HttpMethod, OpenApiTool};
 
 // ---------------------------------------------------------------------------
@@ -118,7 +119,7 @@ impl OpenApiToolset {
         hidden_context: HashMap<String, String>,
     ) -> anyhow::Result<Self> {
         let spec: OpenAPI = serde_yaml::from_str(spec_str)?;
-        let spec = spec.deref_all();
+        let resolver = Resolver::new(&spec);
 
         let base_url = base_url_override
             .map(|s| s.to_string())
@@ -161,19 +162,17 @@ impl OpenApiToolset {
                 let parameters = op
                     .parameters
                     .iter()
-                    .filter_map(|p| match p {
-                        ReferenceOr::Item(param) => extract_param_info(param),
-                        _ => None,
+                    .filter_map(|p| {
+                        let param = resolver.resolve_parameter(p)?;
+                        extract_param_info(param, &resolver)
                     })
                     .collect();
 
                 let (request_body_schema, request_body_required) = op
                     .request_body
                     .as_ref()
-                    .and_then(|rb| match rb {
-                        ReferenceOr::Item(body) => Some(extract_body_schema(body)),
-                        _ => None,
-                    })
+                    .and_then(|rb| resolver.resolve_request_body(rb))
+                    .map(|body| extract_body_schema(body, &resolver))
                     .unwrap_or((None, false));
 
                 tools.push(OpenApiTool {
