@@ -1242,8 +1242,6 @@ name = "rig-openapi-tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "proc-macro2",
- "quote",
  "reqwest 0.12.28",
  "rig-core",
  "serde",
