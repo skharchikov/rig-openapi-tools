@@ -35,7 +35,6 @@ pub(crate) enum ParamLocation {
 }
 
 #[derive(Debug, Clone)]
-#[allow(clippy::manual_non_exhaustive)]
 pub(crate) struct ParamInfo {
     pub name: String,
     pub location: ParamLocation,

@@ -218,10 +218,7 @@ impl OpenApiToolset {
     ///
     /// This is the primary way to add per-request state (user ID, session info, etc.)
     /// while reusing the parsed toolset across requests.
-    pub fn tools_with_context(
-        &self,
-        context: &HashMap<String, String>,
-    ) -> Vec<Box<dyn ToolDyn>> {
+    pub fn tools_with_context(&self, context: &HashMap<String, String>) -> Vec<Box<dyn ToolDyn>> {
         self.tools
             .iter()
             .map(|t| {
@@ -616,7 +613,10 @@ paths:
         let def = tools[0].definition("".into()).await;
 
         let props = def.parameters["properties"].as_object().unwrap();
-        assert!(!props.contains_key("id"), "hidden param should not appear in schema");
+        assert!(
+            !props.contains_key("id"),
+            "hidden param should not appear in schema"
+        );
 
         let required = def.parameters["required"].as_array().unwrap();
         assert!(!required.contains(&Value::String("id".into())));
