@@ -1,0 +1,16 @@
+openapi: 3.0.0
+servers:
+  - url: https://jsonplaceholder.typicode.com
+
+paths:
+  /users/{id}:
+    get:
+      operationId: getUser
+      summary: Get a user by id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The user id
