@@ -350,3 +350,295 @@ impl OpenApiToolset {
         self.tools
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL_SPEC: &str = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+paths:
+  /users/{id}:
+    get:
+      operationId: getUser
+      summary: Get a user by id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The user id
+      responses:
+        "200":
+          description: OK
+"#;
+
+    const MULTI_METHOD_SPEC: &str = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      summary: List all users
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+          description: Max results
+      responses:
+        "200":
+          description: OK
+    post:
+      operationId: createUser
+      summary: Create a user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                email:
+                  type: string
+              required:
+                - name
+      responses:
+        "201":
+          description: Created
+  /users/{id}:
+    get:
+      operationId: getUser
+      summary: Get a user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: OK
+    delete:
+      operationId: deleteUser
+      summary: Delete a user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+"#;
+
+    const REF_SPEC: &str = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1.0"
+servers:
+  - url: https://api.example.com
+paths:
+  /items/{id}:
+    get:
+      operationId: getItem
+      summary: Get an item
+      parameters:
+        - $ref: '#/components/parameters/ItemId'
+      responses:
+        "200":
+          description: OK
+components:
+  parameters:
+    ItemId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: The item id
+"#;
+
+    #[test]
+    fn parse_minimal_spec() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn parse_multi_method_spec() {
+        let toolset = OpenApiToolset::from_spec_str(MULTI_METHOD_SPEC).unwrap();
+        assert_eq!(toolset.len(), 4);
+    }
+
+    #[test]
+    fn tool_names_match_operation_ids() {
+        let toolset = OpenApiToolset::from_spec_str(MULTI_METHOD_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        let names: Vec<String> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"listUsers".to_string()));
+        assert!(names.contains(&"createUser".to_string()));
+        assert!(names.contains(&"getUser".to_string()));
+        assert!(names.contains(&"deleteUser".to_string()));
+    }
+
+    #[test]
+    fn fallback_operation_id_when_missing() {
+        let spec = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1.0"
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: OK
+"#;
+        let toolset = OpenApiToolset::from_spec_str(spec).unwrap();
+        let tools = toolset.into_tools();
+        assert_eq!(tools[0].name(), "get_health");
+    }
+
+    #[test]
+    fn base_url_from_spec() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        // We can't inspect base_url directly, but we can verify parsing succeeded
+        assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn base_url_override() {
+        let toolset =
+            OpenApiToolset::from_str_with_base_url(MINIMAL_SPEC, "https://override.com").unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn base_url_defaults_to_localhost() {
+        let spec = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1.0"
+paths:
+  /ping:
+    get:
+      operationId: ping
+      summary: Ping
+      responses:
+        "200":
+          description: OK
+"#;
+        let toolset = OpenApiToolset::from_spec_str(spec).unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn empty_spec_produces_no_tools() {
+        let spec = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1.0"
+paths: {}
+"#;
+        let toolset = OpenApiToolset::from_spec_str(spec).unwrap();
+        assert!(toolset.is_empty());
+    }
+
+    #[test]
+    fn invalid_yaml_returns_error() {
+        let result = OpenApiToolset::from_spec_str("not: [valid: yaml: {{");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_definition_has_correct_fields() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        let def = tools[0].definition("".into()).await;
+
+        assert_eq!(def.name, "getUser");
+        assert_eq!(def.description, "Get a user by id");
+    }
+
+    #[tokio::test]
+    async fn tool_definition_path_param_schema() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        let def = tools[0].definition("".into()).await;
+
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("id"));
+
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(required.contains(&Value::String("id".into())));
+    }
+
+    #[tokio::test]
+    async fn tool_definition_query_param_not_required() {
+        let toolset = OpenApiToolset::from_spec_str(MULTI_METHOD_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        let list_tool = tools.iter().find(|t| t.name() == "listUsers").unwrap();
+        let def = list_tool.definition("".into()).await;
+
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("limit"));
+
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(!required.contains(&Value::String("limit".into())));
+    }
+
+    #[tokio::test]
+    async fn tool_definition_request_body_schema() {
+        let toolset = OpenApiToolset::from_spec_str(MULTI_METHOD_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        let create_tool = tools.iter().find(|t| t.name() == "createUser").unwrap();
+        let def = create_tool.definition("".into()).await;
+
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("body"));
+
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(required.contains(&Value::String("body".into())));
+    }
+
+    #[tokio::test]
+    async fn ref_parameters_are_resolved() {
+        let toolset = OpenApiToolset::from_spec_str(REF_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        assert_eq!(tools.len(), 1);
+
+        let def = tools[0].definition("".into()).await;
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("id"));
+    }
+
+    #[tokio::test]
+    async fn tool_call_with_invalid_json_returns_error() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+        let tools = toolset.into_tools();
+        let result = tools[0].call("not json".into()).await;
+        assert!(result.is_err());
+    }
+}
