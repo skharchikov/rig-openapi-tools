@@ -6,7 +6,7 @@ use rig_openapi_tools::OpenApiToolset;
 async fn main() -> anyhow::Result<()> {
     let openai = rig::providers::openai::Client::from_env();
 
-    let toolset = OpenApiToolset::from_file("openapi.yaml")?;
+    let toolset = OpenApiToolset::from_file("examples/openapi.yaml")?;
     println!("Loaded {} tools from OpenAPI spec", toolset.len());
 
     let agent = openai
