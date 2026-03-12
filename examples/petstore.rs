@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     let prompts = [
         "What pets are currently available in the store? Show me the first 3.",
-        "Get the store inventory and tell me the status counts.",
+        "How many dogs are in the store?",
         "Look up my user profile and summarize it.",
     ];
 
