@@ -201,7 +201,10 @@ components:
         resolver.inline_refs(&mut value);
 
         let items = &value["properties"]["tags"]["items"];
-        assert!(items.get("$ref").is_none(), "ref in array items should be inlined");
+        assert!(
+            items.get("$ref").is_none(),
+            "ref in array items should be inlined"
+        );
         assert_eq!(items["type"], "object");
         assert!(items["properties"]["name"].is_object());
     }
@@ -237,7 +240,10 @@ components:
         assert!(value["properties"]["value"].is_object());
         // Circular child should become {"type": "object"}
         let child = &value["properties"]["child"];
-        assert!(child.get("$ref").is_none(), "circular ref should be replaced");
+        assert!(
+            child.get("$ref").is_none(),
+            "circular ref should be replaced"
+        );
         assert_eq!(child["type"], "object");
     }
 
@@ -276,7 +282,10 @@ components:
         resolver.inline_refs(&mut value);
 
         let inner = &value["properties"]["middle"]["properties"]["inner"];
-        assert!(inner.get("$ref").is_none(), "transitive ref should be inlined");
+        assert!(
+            inner.get("$ref").is_none(),
+            "transitive ref should be inlined"
+        );
         assert_eq!(inner["type"], "object");
         assert!(inner["properties"]["value"].is_object());
     }
