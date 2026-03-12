@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/sergeikharchikov/rig-openapi-tools"
 keywords = ["openapi", "llm", "rig", "agent", "tools"]
 categories = ["web-programming", "development-tools"]
+readme = "README.md"
 
 [dependencies]
 rig-core = "0.32"

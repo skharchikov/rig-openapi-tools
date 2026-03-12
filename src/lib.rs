@@ -1,3 +1,25 @@
+//! Turn any OpenAPI spec into LLM-callable tools for [rig](https://docs.rs/rig-core).
+//!
+//! Parse an OpenAPI 3.0 YAML/JSON spec and get a set of tools that can be
+//! registered directly with a rig agent. Each operation in the spec becomes
+//! a tool the LLM can call.
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use rig_openapi_tools::OpenApiToolset;
+//!
+//! let spec = std::fs::read_to_string("openapi.yaml").unwrap();
+//! let toolset = OpenApiToolset::builder(&spec)
+//!     .base_url("https://api.example.com")
+//!     .bearer_token("sk-...")
+//!     .build()
+//!     .unwrap();
+//!
+//! // Register with a rig agent
+//! // agent_builder.tools(toolset.into_tools())
+//! ```
+
 mod extract;
 mod resolve;
 mod tool;
