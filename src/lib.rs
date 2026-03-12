@@ -1,6 +1,7 @@
 mod extract;
 mod tool;
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use openapi_utils::SpecExt;
@@ -17,8 +18,9 @@ use crate::tool::{HttpMethod, OpenApiTool};
 /// A set of tools generated from an OpenAPI specification.
 ///
 /// Each operation in the spec becomes a tool that can be registered with a rig agent.
+/// The toolset is designed to be parsed once and reused across requests.
 pub struct OpenApiToolset {
-    tools: Vec<Box<dyn ToolDyn>>,
+    tools: Vec<OpenApiTool>,
 }
 
 /// Builder for configuring an [`OpenApiToolset`].
@@ -26,6 +28,7 @@ pub struct OpenApiToolsetBuilder {
     spec_str: String,
     base_url: Option<String>,
     client: Option<reqwest::Client>,
+    hidden_context: HashMap<String, String>,
 }
 
 impl OpenApiToolsetBuilder {
@@ -38,6 +41,13 @@ impl OpenApiToolsetBuilder {
     /// Provide a pre-configured reqwest client (e.g. with default auth headers or timeouts).
     pub fn client(mut self, client: reqwest::Client) -> Self {
         self.client = Some(client);
+        self
+    }
+
+    /// Add a hidden context parameter that will be auto-injected into tool calls.
+    /// The LLM will not see this parameter in the tool schema.
+    pub fn hidden_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.hidden_context.insert(key.into(), value.into());
         self
     }
 
@@ -59,7 +69,12 @@ impl OpenApiToolsetBuilder {
 
     /// Build the toolset, parsing the spec and creating tools.
     pub fn build(self) -> anyhow::Result<OpenApiToolset> {
-        OpenApiToolset::build_inner(&self.spec_str, self.base_url.as_deref(), self.client)
+        OpenApiToolset::build_inner(
+            &self.spec_str,
+            self.base_url.as_deref(),
+            self.client,
+            self.hidden_context,
+        )
     }
 }
 
@@ -72,7 +87,7 @@ impl OpenApiToolset {
 
     /// Parse an OpenAPI spec from a YAML or JSON string.
     pub fn from_spec_str(spec_str: &str) -> anyhow::Result<Self> {
-        Self::build_inner(spec_str, None, None)
+        Self::build_inner(spec_str, None, None, HashMap::new())
     }
 
     /// Start building a toolset from a YAML or JSON string with configuration options.
@@ -81,6 +96,7 @@ impl OpenApiToolset {
             spec_str: spec_str.to_string(),
             base_url: None,
             client: None,
+            hidden_context: HashMap::new(),
         }
     }
 
@@ -91,6 +107,7 @@ impl OpenApiToolset {
             spec_str: content,
             base_url: None,
             client: None,
+            hidden_context: HashMap::new(),
         })
     }
 
@@ -98,6 +115,7 @@ impl OpenApiToolset {
         spec_str: &str,
         base_url_override: Option<&str>,
         client: Option<reqwest::Client>,
+        hidden_context: HashMap<String, String>,
     ) -> anyhow::Result<Self> {
         let spec: OpenAPI = serde_yaml::from_str(spec_str)?;
         let spec = spec.deref_all();
@@ -109,7 +127,7 @@ impl OpenApiToolset {
         let base_url = base_url.trim_end_matches('/').to_string();
 
         let client = client.unwrap_or_default();
-        let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
+        let mut tools: Vec<OpenApiTool> = Vec::new();
 
         for (path_template, path_item_ref) in &spec.paths {
             let ReferenceOr::Item(path_item) = path_item_ref else {
@@ -158,7 +176,7 @@ impl OpenApiToolset {
                     })
                     .unwrap_or((None, false));
 
-                tools.push(Box::new(OpenApiTool {
+                tools.push(OpenApiTool {
                     client: client.clone(),
                     base_url: base_url.clone(),
                     method,
@@ -168,7 +186,8 @@ impl OpenApiToolset {
                     parameters,
                     request_body_schema,
                     request_body_required,
-                }));
+                    hidden_params: hidden_context.clone(),
+                });
             }
         }
 
@@ -188,6 +207,46 @@ impl OpenApiToolset {
     /// Consume the toolset and return tools for use with rig's `AgentBuilder::tools()`.
     pub fn into_tools(self) -> Vec<Box<dyn ToolDyn>> {
         self.tools
+            .into_iter()
+            .map(|t| Box::new(t) as Box<dyn ToolDyn>)
+            .collect()
+    }
+
+    /// Clone the tools with per-request context injected as hidden parameters.
+    /// The LLM will not see these parameters in tool schemas, but they will be
+    /// auto-injected into every tool call at execution time.
+    ///
+    /// This is the primary way to add per-request state (user ID, session info, etc.)
+    /// while reusing the parsed toolset across requests.
+    pub fn tools_with_context(
+        &self,
+        context: &HashMap<String, String>,
+    ) -> Vec<Box<dyn ToolDyn>> {
+        self.tools
+            .iter()
+            .map(|t| {
+                let mut tool = t.clone();
+                tool.hidden_params.extend(context.clone());
+                Box::new(tool) as Box<dyn ToolDyn>
+            })
+            .collect()
+    }
+
+    /// Generate a preamble snippet describing the visible context for the LLM.
+    /// Include this in your agent's `.preamble()` so the LLM knows about
+    /// available context values it can use when calling tools.
+    pub fn context_preamble(context: &HashMap<String, String>) -> String {
+        if context.is_empty() {
+            return String::new();
+        }
+        let entries: Vec<String> = context
+            .iter()
+            .map(|(k, v)| format!("- {k} = {v}"))
+            .collect();
+        format!(
+            "The following context is available. Use these values when calling tools:\n{}",
+            entries.join("\n")
+        )
     }
 }
 
@@ -545,5 +604,67 @@ paths:
         let tools = toolset.into_tools();
         let result = tools[0].call("not json".into()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn hidden_context_excluded_from_schema() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .hidden_context("id", "123")
+            .build()
+            .unwrap();
+        let tools = toolset.into_tools();
+        let def = tools[0].definition("".into()).await;
+
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(!props.contains_key("id"), "hidden param should not appear in schema");
+
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(!required.contains(&Value::String("id".into())));
+    }
+
+    #[tokio::test]
+    async fn tools_with_context_excludes_from_schema() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+
+        // Without context, "id" is visible
+        let tools = toolset.tools_with_context(&HashMap::new());
+        let def = tools[0].definition("".into()).await;
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("id"));
+
+        // With context, "id" is hidden
+        let ctx = HashMap::from([("id".to_string(), "42".to_string())]);
+        let tools = toolset.tools_with_context(&ctx);
+        let def = tools[0].definition("".into()).await;
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(!props.contains_key("id"));
+    }
+
+    #[test]
+    fn toolset_reusable_across_contexts() {
+        let toolset = OpenApiToolset::from_spec_str(MULTI_METHOD_SPEC).unwrap();
+
+        let ctx1 = HashMap::from([("id".to_string(), "1".to_string())]);
+        let ctx2 = HashMap::from([("id".to_string(), "2".to_string())]);
+
+        let tools1 = toolset.tools_with_context(&ctx1);
+        let tools2 = toolset.tools_with_context(&ctx2);
+
+        assert_eq!(tools1.len(), 4);
+        assert_eq!(tools2.len(), 4);
+    }
+
+    #[test]
+    fn context_preamble_generation() {
+        let ctx = HashMap::from([("user_id".to_string(), "123".to_string())]);
+        let preamble = OpenApiToolset::context_preamble(&ctx);
+        assert!(preamble.contains("user_id = 123"));
+        assert!(preamble.contains("Use these values"));
+    }
+
+    #[test]
+    fn context_preamble_empty() {
+        let preamble = OpenApiToolset::context_preamble(&HashMap::new());
+        assert!(preamble.is_empty());
     }
 }

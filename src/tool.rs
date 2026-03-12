@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -34,6 +35,7 @@ pub(crate) enum ParamLocation {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::manual_non_exhaustive)]
 pub(crate) struct ParamInfo {
     pub name: String,
     pub location: ParamLocation,
@@ -42,6 +44,7 @@ pub(crate) struct ParamInfo {
     pub schema: Value,
 }
 
+#[derive(Clone)]
 pub(crate) struct OpenApiTool {
     pub client: reqwest::Client,
     pub base_url: String,
@@ -52,6 +55,7 @@ pub(crate) struct OpenApiTool {
     pub parameters: Vec<ParamInfo>,
     pub request_body_schema: Option<Value>,
     pub request_body_required: bool,
+    pub hidden_params: HashMap<String, String>,
 }
 
 impl OpenApiTool {
@@ -60,6 +64,10 @@ impl OpenApiTool {
         let mut required = Vec::new();
 
         for p in &self.parameters {
+            // Skip params that will be auto-injected from hidden context
+            if self.hidden_params.contains_key(&p.name) {
+                continue;
+            }
             let mut schema = p.schema.clone();
             if let Value::Object(ref mut map) = schema {
                 if !p.description.is_empty() {
@@ -90,7 +98,14 @@ impl OpenApiTool {
         &self,
         args: Value,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let args_obj = args.as_object().unwrap_or(&serde_json::Map::new()).clone();
+        let mut args_obj = args.as_object().unwrap_or(&serde_json::Map::new()).clone();
+
+        // Inject hidden context params (don't override LLM-provided values)
+        for (key, val) in &self.hidden_params {
+            args_obj
+                .entry(key.clone())
+                .or_insert_with(|| Value::String(val.clone()));
+        }
 
         // Build URL: substitute path params
         let mut path = self.path_template.clone();
