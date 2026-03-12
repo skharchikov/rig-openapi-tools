@@ -1,228 +1,14 @@
-use std::future::Future;
+mod extract;
+mod tool;
+
 use std::path::Path;
-use std::pin::Pin;
 
 use openapi_utils::SpecExt;
-use openapiv3::{OpenAPI, Parameter, ParameterSchemaOrContent, ReferenceOr};
-use rig::completion::ToolDefinition;
-use rig::tool::{ToolDyn, ToolError};
-use serde_json::Value;
+use openapiv3::{OpenAPI, ReferenceOr};
+use rig::tool::ToolDyn;
 
-// ---------------------------------------------------------------------------
-// Internal types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum HttpMethod {
-    Get,
-    Post,
-    Put,
-    Patch,
-    Delete,
-}
-
-impl HttpMethod {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Post => "POST",
-            Self::Put => "PUT",
-            Self::Patch => "PATCH",
-            Self::Delete => "DELETE",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ParamLocation {
-    Path,
-    Query,
-    Header,
-}
-
-#[derive(Debug, Clone)]
-struct ParamInfo {
-    name: String,
-    location: ParamLocation,
-    required: bool,
-    description: String,
-    schema: Value,
-}
-
-struct OpenApiTool {
-    client: reqwest::Client,
-    base_url: String,
-    method: HttpMethod,
-    path_template: String,
-    operation_id: String,
-    description: String,
-    parameters: Vec<ParamInfo>,
-    request_body_schema: Option<Value>,
-    request_body_required: bool,
-}
-
-impl OpenApiTool {
-    fn build_parameters_schema(&self) -> Value {
-        let mut properties = serde_json::Map::new();
-        let mut required = Vec::new();
-
-        for p in &self.parameters {
-            let mut schema = p.schema.clone();
-            if let Value::Object(ref mut map) = schema {
-                if !p.description.is_empty() {
-                    map.insert("description".into(), Value::String(p.description.clone()));
-                }
-            }
-            properties.insert(p.name.clone(), schema);
-            if p.required {
-                required.push(Value::String(p.name.clone()));
-            }
-        }
-
-        if let Some(body_schema) = &self.request_body_schema {
-            properties.insert("body".into(), body_schema.clone());
-            if self.request_body_required {
-                required.push(Value::String("body".into()));
-            }
-        }
-
-        serde_json::json!({
-            "type": "object",
-            "properties": properties,
-            "required": required,
-        })
-    }
-
-    async fn execute(
-        &self,
-        args: Value,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let args_obj = args.as_object().unwrap_or(&serde_json::Map::new()).clone();
-
-        // Build URL: substitute path params
-        let mut path = self.path_template.clone();
-        for p in &self.parameters {
-            if matches!(p.location, ParamLocation::Path) {
-                let val = args_obj
-                    .get(&p.name)
-                    .map(|v| match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .unwrap_or_default();
-                path = path.replace(&format!("{{{}}}", p.name), &val);
-            }
-        }
-
-        let url = format!("{}{}", self.base_url, path);
-
-        let mut req = match self.method {
-            HttpMethod::Get => self.client.get(&url),
-            HttpMethod::Post => self.client.post(&url),
-            HttpMethod::Put => self.client.put(&url),
-            HttpMethod::Patch => self.client.patch(&url),
-            HttpMethod::Delete => self.client.delete(&url),
-        };
-
-        // Query params
-        let query_params: Vec<(String, String)> = self
-            .parameters
-            .iter()
-            .filter(|p| matches!(p.location, ParamLocation::Query))
-            .filter_map(|p| {
-                args_obj.get(&p.name).map(|v| {
-                    let val = match v {
-                        Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    };
-                    (p.name.clone(), val)
-                })
-            })
-            .collect();
-
-        if !query_params.is_empty() {
-            req = req.query(&query_params);
-        }
-
-        // Request body
-        if let Some(body) = args_obj.get("body") {
-            req = req.json(body);
-        }
-
-        let resp = req.send().await?.error_for_status()?;
-        let json: Value = resp.json().await?;
-        Ok(json)
-    }
-}
-
-impl ToolDyn for OpenApiTool {
-    fn name(&self) -> String {
-        self.operation_id.clone()
-    }
-
-    fn definition<'a>(
-        &'a self,
-        _prompt: String,
-    ) -> Pin<Box<dyn Future<Output = ToolDefinition> + Send + 'a>> {
-        let def = ToolDefinition {
-            name: self.operation_id.clone(),
-            description: self.description.clone(),
-            parameters: self.build_parameters_schema(),
-        };
-        Box::pin(async move { def })
-    }
-
-    fn call<'a>(
-        &'a self,
-        args: String,
-    ) -> Pin<Box<dyn Future<Output = Result<String, ToolError>> + Send + 'a>> {
-        Box::pin(async move {
-            let args: Value = serde_json::from_str(&args)?;
-            let result = self.execute(args).await.map_err(ToolError::ToolCallError)?;
-            serde_json::to_string(&result).map_err(ToolError::JsonError)
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers for extracting data from openapiv3 types
-// ---------------------------------------------------------------------------
-
-fn extract_param_info(param: &Parameter) -> Option<ParamInfo> {
-    let (data, location) = match param {
-        Parameter::Path { parameter_data, .. } => (parameter_data, ParamLocation::Path),
-        Parameter::Query { parameter_data, .. } => (parameter_data, ParamLocation::Query),
-        Parameter::Header { parameter_data, .. } => (parameter_data, ParamLocation::Header),
-        Parameter::Cookie { .. } => return None,
-    };
-
-    let schema = match &data.format {
-        ParameterSchemaOrContent::Schema(ReferenceOr::Item(schema)) => {
-            serde_json::to_value(schema).unwrap_or(serde_json::json!({"type": "string"}))
-        }
-        _ => serde_json::json!({"type": "string"}),
-    };
-
-    Some(ParamInfo {
-        name: data.name.clone(),
-        location,
-        required: data.required,
-        description: data.description.clone().unwrap_or_default(),
-        schema,
-    })
-}
-
-fn extract_body_schema(body: &openapiv3::RequestBody) -> (Option<Value>, bool) {
-    let schema = body
-        .content
-        .get("application/json")
-        .and_then(|mt| mt.schema.as_ref())
-        .and_then(|s| match s {
-            ReferenceOr::Item(schema) => serde_json::to_value(schema).ok(),
-            _ => None,
-        });
-    (schema, body.required)
-}
+use crate::extract::{extract_body_schema, extract_param_info};
+use crate::tool::{HttpMethod, OpenApiTool};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -235,6 +21,48 @@ pub struct OpenApiToolset {
     tools: Vec<Box<dyn ToolDyn>>,
 }
 
+/// Builder for configuring an [`OpenApiToolset`].
+pub struct OpenApiToolsetBuilder {
+    spec_str: String,
+    base_url: Option<String>,
+    client: Option<reqwest::Client>,
+}
+
+impl OpenApiToolsetBuilder {
+    /// Override the base URL from the spec.
+    pub fn base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = Some(url.into());
+        self
+    }
+
+    /// Provide a pre-configured reqwest client (e.g. with default auth headers or timeouts).
+    pub fn client(mut self, client: reqwest::Client) -> Self {
+        self.client = Some(client);
+        self
+    }
+
+    /// Convenience: create a client with a bearer token `Authorization` header.
+    pub fn bearer_token(self, token: &str) -> Self {
+        use reqwest::header;
+        let mut headers = header::HeaderMap::new();
+        let mut auth_value =
+            header::HeaderValue::from_str(&format!("Bearer {token}")).expect("invalid token");
+        auth_value.set_sensitive(true);
+        headers.insert(header::AUTHORIZATION, auth_value);
+
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .expect("failed to build reqwest client");
+        self.client(client)
+    }
+
+    /// Build the toolset, parsing the spec and creating tools.
+    pub fn build(self) -> anyhow::Result<OpenApiToolset> {
+        OpenApiToolset::build_inner(&self.spec_str, self.base_url.as_deref(), self.client)
+    }
+}
+
 impl OpenApiToolset {
     /// Parse an OpenAPI spec from a YAML or JSON file.
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -244,21 +72,33 @@ impl OpenApiToolset {
 
     /// Parse an OpenAPI spec from a YAML or JSON string.
     pub fn from_spec_str(spec_str: &str) -> anyhow::Result<Self> {
-        Self::build(spec_str, None)
+        Self::build_inner(spec_str, None, None)
     }
 
-    /// Parse an OpenAPI spec, overriding the base URL from the spec.
-    pub fn from_str_with_base_url(spec_str: &str, base_url: &str) -> anyhow::Result<Self> {
-        Self::build(spec_str, Some(base_url))
+    /// Start building a toolset from a YAML or JSON string with configuration options.
+    pub fn builder(spec_str: &str) -> OpenApiToolsetBuilder {
+        OpenApiToolsetBuilder {
+            spec_str: spec_str.to_string(),
+            base_url: None,
+            client: None,
+        }
     }
 
-    /// Parse an OpenAPI spec file, overriding the base URL from the spec.
-    pub fn from_file_with_base_url(path: impl AsRef<Path>, base_url: &str) -> anyhow::Result<Self> {
+    /// Start building a toolset from a file with configuration options.
+    pub fn builder_from_file(path: impl AsRef<Path>) -> anyhow::Result<OpenApiToolsetBuilder> {
         let content = std::fs::read_to_string(path)?;
-        Self::build(&content, Some(base_url))
+        Ok(OpenApiToolsetBuilder {
+            spec_str: content,
+            base_url: None,
+            client: None,
+        })
     }
 
-    fn build(spec_str: &str, base_url_override: Option<&str>) -> anyhow::Result<Self> {
+    fn build_inner(
+        spec_str: &str,
+        base_url_override: Option<&str>,
+        client: Option<reqwest::Client>,
+    ) -> anyhow::Result<Self> {
         let spec: OpenAPI = serde_yaml::from_str(spec_str)?;
         let spec = spec.deref_all();
 
@@ -268,7 +108,7 @@ impl OpenApiToolset {
             .unwrap_or_else(|| "http://localhost".into());
         let base_url = base_url.trim_end_matches('/').to_string();
 
-        let client = reqwest::Client::new();
+        let client = client.unwrap_or_default();
         let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
 
         for (path_template, path_item_ref) in &spec.paths {
@@ -300,7 +140,7 @@ impl OpenApiToolset {
                     .or_else(|| op.description.clone())
                     .unwrap_or_else(|| format!("{} {}", method.as_str(), path_template));
 
-                let parameters: Vec<ParamInfo> = op
+                let parameters = op
                     .parameters
                     .iter()
                     .filter_map(|p| match p {
@@ -354,6 +194,7 @@ impl OpenApiToolset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     const MINIMAL_SPEC: &str = r#"
 openapi: "3.0.0"
@@ -522,14 +363,47 @@ paths:
     fn base_url_from_spec() {
         let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
         let tools = toolset.into_tools();
-        // We can't inspect base_url directly, but we can verify parsing succeeded
         assert_eq!(tools.len(), 1);
     }
 
     #[test]
-    fn base_url_override() {
-        let toolset =
-            OpenApiToolset::from_str_with_base_url(MINIMAL_SPEC, "https://override.com").unwrap();
+    fn builder_base_url_override() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .base_url("https://override.com")
+            .build()
+            .unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn builder_bearer_token() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .bearer_token("test-token-123")
+            .build()
+            .unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn builder_custom_client() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .client(client)
+            .build()
+            .unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn builder_all_options() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .base_url("https://custom.api.com")
+            .bearer_token("sk-123")
+            .build()
+            .unwrap();
         assert_eq!(toolset.len(), 1);
     }
 
@@ -632,6 +506,37 @@ paths: {}
         let def = tools[0].definition("".into()).await;
         let props = def.parameters["properties"].as_object().unwrap();
         assert!(props.contains_key("id"));
+    }
+
+    #[tokio::test]
+    async fn tool_definition_header_param() {
+        let spec = r#"
+openapi: "3.0.0"
+info:
+  title: Test
+  version: "1.0"
+paths:
+  /data:
+    get:
+      operationId: getData
+      summary: Get data
+      parameters:
+        - name: X-Request-Id
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Correlation ID
+      responses:
+        "200":
+          description: OK
+"#;
+        let toolset = OpenApiToolset::from_spec_str(spec).unwrap();
+        let tools = toolset.into_tools();
+        let def = tools[0].definition("".into()).await;
+
+        let props = def.parameters["properties"].as_object().unwrap();
+        assert!(props.contains_key("X-Request-Id"));
     }
 
     #[tokio::test]
