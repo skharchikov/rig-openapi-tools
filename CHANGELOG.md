@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/skharchikov/rig-openapi-tools/compare/v0.1.3...v0.1.4) - 2026-03-16
+
+### Other
+
+- add dependabot config for Rust dependencies
+
 ## [0.1.3](https://github.com/skharchikov/rig-openapi-tools/compare/v0.1.2...v0.1.3) - 2026-03-13
 
 ### Other
