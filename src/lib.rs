@@ -197,7 +197,7 @@ impl OpenApiToolset {
 
         let mut tools: Vec<OpenApiTool> = Vec::new();
 
-        for (path_template, path_item_ref) in &spec.paths {
+        for (path_template, path_item_ref) in spec.paths.iter() {
             let ReferenceOr::Item(path_item) = path_item_ref else {
                 continue;
             };
@@ -213,7 +213,7 @@ impl OpenApiToolset {
             for (method, op) in methods {
                 let Some(op) = op else { continue };
 
-                let method_lower = method.as_str().to_lowercase();
+                let method_lower: String = method.as_str().to_lowercase();
                 let operation_id = op.operation_id.clone().unwrap_or_else(|| {
                     let path_slug = path_template.replace('/', "_");
                     let path_slug = path_slug.trim_start_matches('_');
