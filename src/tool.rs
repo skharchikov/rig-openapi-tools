@@ -55,6 +55,8 @@ pub(crate) struct OpenApiTool {
     pub request_body_schema: Option<Value>,
     pub request_body_required: bool,
     pub hidden_params: HashMap<String, String>,
+    pub static_query_params: Vec<(String, String)>,
+    pub basic_auth: Option<(String, String)>,
 }
 
 impl OpenApiTool {
@@ -151,6 +153,10 @@ impl OpenApiTool {
             req = req.query(&query_params);
         }
 
+        if !self.static_query_params.is_empty() {
+            req = req.query(&self.static_query_params);
+        }
+
         // Header params
         for p in &self.parameters {
             if matches!(p.location, ParamLocation::Header) {
@@ -167,6 +173,10 @@ impl OpenApiTool {
         // Request body
         if let Some(body) = args_obj.get("body") {
             req = req.json(body);
+        }
+
+        if let Some((user, pass)) = &self.basic_auth {
+            req = req.basic_auth(user, Some(pass));
         }
 
         let resp = req.send().await?.error_for_status()?;
