@@ -83,7 +83,8 @@ impl OpenApiToolsetBuilder {
         let mut auth_value =
             header::HeaderValue::from_str(&format!("Bearer {token}")).expect("invalid token");
         auth_value.set_sensitive(true);
-        self.default_headers.insert(header::AUTHORIZATION, auth_value);
+        self.default_headers
+            .insert(header::AUTHORIZATION, auth_value);
         self
     }
 

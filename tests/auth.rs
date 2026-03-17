@@ -30,9 +30,7 @@ async fn bearer_token_sent_as_authorization_header() {
     Mock::given(method("GET"))
         .and(path("/hello"))
         .and(header("authorization", "Bearer mytoken"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
         .expect(1)
         .mount(&server)
         .await;
@@ -54,9 +52,7 @@ async fn api_key_header_sent_correctly() {
     Mock::given(method("GET"))
         .and(path("/hello"))
         .and(header("x-api-key", "mykey"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
         .expect(1)
         .mount(&server)
         .await;
@@ -78,9 +74,7 @@ async fn api_key_query_param_appended() {
     Mock::given(method("GET"))
         .and(path("/hello"))
         .and(query_param("api_key", "mykey"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
         .expect(1)
         .mount(&server)
         .await;
@@ -103,9 +97,7 @@ async fn basic_auth_sent_as_authorization_header() {
     Mock::given(method("GET"))
         .and(path("/hello"))
         .and(header("authorization", "Basic dXNlcjpwYXNz"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
         .expect(1)
         .mount(&server)
         .await;
