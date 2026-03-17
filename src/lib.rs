@@ -771,4 +771,60 @@ paths:
             .unwrap();
         assert_eq!(toolset.len(), 1);
     }
+
+    #[test]
+    fn api_key_query_params_stored_on_tools() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .api_key_query("api_key", "secret123")
+            .build()
+            .unwrap();
+        let tool = &toolset.tools[0];
+        assert!(tool
+            .static_query_params
+            .contains(&("api_key".to_string(), "secret123".to_string())));
+    }
+
+    #[test]
+    fn multiple_api_key_queries_stack() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .api_key_query("api_key", "key1")
+            .api_key_query("version", "v2")
+            .build()
+            .unwrap();
+        let tool = &toolset.tools[0];
+        assert_eq!(tool.static_query_params.len(), 2);
+        assert!(tool
+            .static_query_params
+            .contains(&("api_key".to_string(), "key1".to_string())));
+        assert!(tool
+            .static_query_params
+            .contains(&("version".to_string(), "v2".to_string())));
+    }
+
+    #[test]
+    fn basic_auth_credentials_stored_on_tools() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .basic_auth("alice", "s3cr3t")
+            .build()
+            .unwrap();
+        let tool = &toolset.tools[0];
+        assert_eq!(
+            tool.basic_auth,
+            Some(("alice".to_string(), "s3cr3t".to_string()))
+        );
+    }
+
+    #[test]
+    fn basic_auth_not_set_by_default() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+        let tool = &toolset.tools[0];
+        assert!(tool.basic_auth.is_none());
+    }
+
+    #[test]
+    fn api_key_query_not_set_by_default() {
+        let toolset = OpenApiToolset::from_spec_str(MINIMAL_SPEC).unwrap();
+        let tool = &toolset.tools[0];
+        assert!(tool.static_query_params.is_empty());
+    }
 }
