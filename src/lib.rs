@@ -52,6 +52,9 @@ pub struct OpenApiToolsetBuilder {
     base_url: Option<String>,
     client: Option<reqwest::Client>,
     hidden_context: HashMap<String, String>,
+    default_headers: reqwest::header::HeaderMap,
+    static_query_params: Vec<(String, String)>,
+    basic_auth: Option<(String, String)>,
 }
 
 impl OpenApiToolsetBuilder {
@@ -74,29 +77,56 @@ impl OpenApiToolsetBuilder {
         self
     }
 
-    /// Convenience: create a client with a bearer token `Authorization` header.
-    pub fn bearer_token(self, token: &str) -> Self {
+    /// Convenience: configure a bearer token `Authorization` header for all requests.
+    pub fn bearer_token(mut self, token: &str) -> Self {
         use reqwest::header;
-        let mut headers = header::HeaderMap::new();
         let mut auth_value =
             header::HeaderValue::from_str(&format!("Bearer {token}")).expect("invalid token");
         auth_value.set_sensitive(true);
-        headers.insert(header::AUTHORIZATION, auth_value);
+        self.default_headers.insert(header::AUTHORIZATION, auth_value);
+        self
+    }
 
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .expect("failed to build reqwest client");
-        self.client(client)
+    /// Inject an arbitrary header into every request (e.g. `X-API-Key: abc`).
+    pub fn api_key_header(mut self, header_name: &str, key: &str) -> Self {
+        use reqwest::header::HeaderValue;
+        let name = reqwest::header::HeaderName::from_bytes(header_name.as_bytes())
+            .expect("invalid header name");
+        let mut value = HeaderValue::from_str(key).expect("invalid header value");
+        value.set_sensitive(true);
+        self.default_headers.insert(name, value);
+        self
+    }
+
+    /// Append a static query parameter to every request (e.g. `?api_key=abc`).
+    pub fn api_key_query(mut self, param_name: &str, key: &str) -> Self {
+        self.static_query_params
+            .push((param_name.to_string(), key.to_string()));
+        self
+    }
+
+    /// Configure HTTP Basic auth applied to every request.
+    pub fn basic_auth(mut self, username: &str, password: &str) -> Self {
+        self.basic_auth = Some((username.to_string(), password.to_string()));
+        self
     }
 
     /// Build the toolset, parsing the spec and creating tools.
     pub fn build(self) -> anyhow::Result<OpenApiToolset> {
+        let client = if let Some(c) = self.client {
+            c
+        } else {
+            reqwest::Client::builder()
+                .default_headers(self.default_headers)
+                .build()?
+        };
         OpenApiToolset::build_inner(
             &self.spec_str,
             self.base_url.as_deref(),
-            self.client,
+            client,
             self.hidden_context,
+            self.static_query_params,
+            self.basic_auth,
         )
     }
 }
@@ -110,7 +140,14 @@ impl OpenApiToolset {
 
     /// Parse an OpenAPI spec from a YAML or JSON string.
     pub fn from_spec_str(spec_str: &str) -> anyhow::Result<Self> {
-        Self::build_inner(spec_str, None, None, HashMap::new())
+        Self::build_inner(
+            spec_str,
+            None,
+            reqwest::Client::default(),
+            HashMap::new(),
+            Vec::new(),
+            None,
+        )
     }
 
     /// Start building a toolset from a YAML or JSON string with configuration options.
@@ -120,6 +157,9 @@ impl OpenApiToolset {
             base_url: None,
             client: None,
             hidden_context: HashMap::new(),
+            default_headers: reqwest::header::HeaderMap::new(),
+            static_query_params: Vec::new(),
+            basic_auth: None,
         }
     }
 
@@ -131,14 +171,19 @@ impl OpenApiToolset {
             base_url: None,
             client: None,
             hidden_context: HashMap::new(),
+            default_headers: reqwest::header::HeaderMap::new(),
+            static_query_params: Vec::new(),
+            basic_auth: None,
         })
     }
 
     fn build_inner(
         spec_str: &str,
         base_url_override: Option<&str>,
-        client: Option<reqwest::Client>,
+        client: reqwest::Client,
         hidden_context: HashMap<String, String>,
+        static_query_params: Vec<(String, String)>,
+        basic_auth: Option<(String, String)>,
     ) -> anyhow::Result<Self> {
         let spec: OpenAPI = serde_yaml::from_str(spec_str)?;
         let resolver = Resolver::new(&spec);
@@ -149,7 +194,6 @@ impl OpenApiToolset {
             .unwrap_or_else(|| "http://localhost".into());
         let base_url = base_url.trim_end_matches('/').to_string();
 
-        let client = client.unwrap_or_default();
         let mut tools: Vec<OpenApiTool> = Vec::new();
 
         for (path_template, path_item_ref) in &spec.paths {
@@ -208,6 +252,8 @@ impl OpenApiToolset {
                     request_body_schema,
                     request_body_required,
                     hidden_params: hidden_context.clone(),
+                    static_query_params: static_query_params.clone(),
+                    basic_auth: basic_auth.clone(),
                 });
             }
         }
@@ -687,5 +733,42 @@ paths:
     fn context_preamble_empty() {
         let preamble = OpenApiToolset::context_preamble(&HashMap::new());
         assert!(preamble.is_empty());
+    }
+
+    #[test]
+    fn builder_api_key_header() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .api_key_header("X-API-Key", "abc123")
+            .build()
+            .unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn builder_api_key_query() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .api_key_query("api_key", "abc123")
+            .build()
+            .unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn builder_basic_auth() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .basic_auth("user", "pass")
+            .build()
+            .unwrap();
+        assert_eq!(toolset.len(), 1);
+    }
+
+    #[test]
+    fn builder_multiple_auth() {
+        let toolset = OpenApiToolset::builder(MINIMAL_SPEC)
+            .bearer_token("sk-123")
+            .api_key_header("X-Tenant-Id", "tenant-abc")
+            .build()
+            .unwrap();
+        assert_eq!(toolset.len(), 1);
     }
 }
