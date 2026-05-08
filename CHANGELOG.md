@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/skharchikov/rig-openapi-tools/compare/v0.1.5...v0.1.6) - 2026-05-07
+
+### Other
+
+- *(deps)* update rig-core requirement in the rust-dependencies group ([#12](https://github.com/skharchikov/rig-openapi-tools/pull/12))
+
 ## [0.1.5](https://github.com/skharchikov/rig-openapi-tools/compare/v0.1.4...v0.1.5) - 2026-03-17
 
 ### Other
