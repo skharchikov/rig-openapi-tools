@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/skharchikov/rig-openapi-tools/compare/v0.1.6...v0.1.7) - 2026-05-08
+
+### Added
+
+- add api_key_header, api_key_query, and basic_auth schemes ([#11](https://github.com/skharchikov/rig-openapi-tools/pull/11))
+
 ## [0.1.6](https://github.com/skharchikov/rig-openapi-tools/compare/v0.1.5...v0.1.6) - 2026-05-07
 
 ### Other
