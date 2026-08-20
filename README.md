@@ -8,8 +8,8 @@ Parses the spec at runtime into `ToolDyn` trait objects. Supports path/query/hea
 
 ```toml
 [dependencies]
-rig-openapi-tools = { path = "." }
-rig-core = "0.32"
+rig-openapi-tools = "0.1.6"
+rig-core = "0.34"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -52,6 +52,9 @@ let toolset = OpenApiToolset::builder_from_file("spec.yaml")?
 |---|---|
 | `.base_url(url)` | Override the base URL from the spec |
 | `.bearer_token(token)` | Set a Bearer token for all requests |
+| `.api_key_header(name, key)` | Inject a static header into all requests (for API keys, etc.) |
+| `.api_key_query(name, key)` | Append a static query parameter to all requests |
+| `.basic_auth(username, password)` | Configure HTTP Basic auth for all requests |
 | `.client(client)` | Provide a pre-configured `reqwest::Client` |
 | `.hidden_context(key, value)` | Auto-inject a param into tool calls, invisible to the LLM |
 
